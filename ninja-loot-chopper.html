@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>🥷 Ninja Loot Chopper</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;}
+  body{background:#050510;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;font-family:'Courier New',monospace;overflow:hidden;user-select:none;}
+  #root{display:flex;flex-direction:column;align-items:center;justify-content:center;width:100%;min-height:100vh;}
+  canvas{display:block;touch-action:none;}
+  button{-webkit-tap-highlight-color:transparent;font-family:'Courier New',monospace;}
+  input{font-family:'Courier New',monospace;}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:0.6;}}
+  @keyframes shake{0%,100%{transform:translateX(0);}20%{transform:translateX(-8px);}40%{transform:translateX(8px);}60%{transform:translateX(-5px);}80%{transform:translateX(5px);}}
+  @keyframes glow{0%,100%{box-shadow:0 0 10px #ffd700aa;}50%{box-shadow:0 0 30px #ffd700,0 0 60px #ffd70066;}}
+  .shake{animation:shake 0.4s ease;}
+  .pulse{animation:pulse 1.5s infinite;}
+  .glow-btn{animation:glow 2s infinite;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+// ─── CONFIG — EDIT THESE ─────────────────────────────────────
+// To add access codes: add them to this array.
+// Share codes with paying customers. Case-insensitive.
+const VALID_CODES = [
+  "NINJA2024",
+  "EDGE-PRO",
+  "NEXUS-VIP",
+  "AUSSIE99",
+  "MANAS-FULL",
+];
+
+// Stripe / payment link — replace with your real link
+const PAYMENT_URL = "https://buy.stripe.com/your-link-here";
+
+// Free levels before paywall
+const FREE_LEVELS = 3;
+// ─────────────────────────────────────────────────────────────
+
+const CANVAS_W=480,CANVAS_H=600,GRAVITY=0.5,JUMP_V=-13,NINJA_W=36,NINJA_H=44,BLADE_W=56,BLADE_H=14,GROUND_Y=CANVAS_H-60;
+
+const LEVEL_CONFIG=[
+  {level:1, speed:2.2,spawnRate:90, tokensNeeded:8,  name:"Rice Fields",   bg:"#1a3a1a",accent:"#4ade80"},
+  {level:2, speed:2.7,spawnRate:80, tokensNeeded:12, name:"Bamboo Forest", bg:"#1a2a1a",accent:"#86efac"},
+  {level:3, speed:3.2,spawnRate:72, tokensNeeded:16, name:"Misty Valley",  bg:"#1a1a2e",accent:"#818cf8"},
+  {level:4, speed:3.7,spawnRate:64, tokensNeeded:20, name:"Fire Dojo",     bg:"#2e1a1a",accent:"#fb923c"},
+  {level:5, speed:4.2,spawnRate:58, tokensNeeded:25, name:"Storm Peak",    bg:"#1a1a2e",accent:"#38bdf8"},
+  {level:6, speed:4.8,spawnRate:50, tokensNeeded:30, name:"Shadow Temple", bg:"#0f0f1a",accent:"#c084fc"},
+  {level:7, speed:5.4,spawnRate:44, tokensNeeded:36, name:"Ice Citadel",   bg:"#0f1a2e",accent:"#67e8f9"},
+  {level:8, speed:6.0,spawnRate:38, tokensNeeded:42, name:"Lava Fortress", bg:"#2e0f0f",accent:"#fbbf24"},
+  {level:9, speed:6.8,spawnRate:32, tokensNeeded:50, name:"Dragon's Lair", bg:"#1a0f2e",accent:"#f472b6"},
+  {level:10,speed:7.8,spawnRate:26, tokensNeeded:60, name:"Ninja Heaven",  bg:"#000000",accent:"#ffd700"},
+];
+
+const FRUITS=["🍎","🍊","🍋","🍇","🍓","🥝","🍑","🍍","🥭","🍌","🫐","🍒"];
+const VEGS=["🥕","🌽","🥦","🍆","🥑","🧅","🥬","🫑","🍄","🧄","🥒","🍅"];
+const BOMBS=["💣","🔥","⚡","🪨"];
+const ri=a=>a[Math.floor(Math.random()*a.length)];
+
+// ─── ACCESS CONTROL ──────────────────────────────────────────
+function isUnlocked(){
+  try{ return localStorage.getItem('nlc_unlocked')==='yes'; }catch(e){return false;}
+}
+function unlockGame(){
+  try{ localStorage.setItem('nlc_unlocked','yes'); }catch(e){}
+}
+function validateCode(code){
+  return VALID_CODES.some(c=>c.toLowerCase()===code.toLowerCase().trim());
+}
+
+// ─── STATE ───────────────────────────────────────────────────
+let S=null,RAF=null,KEYS={},SCREEN="menu";
+
+function initState(startLevel=1){
+  const cfg=LEVEL_CONFIG[startLevel-1];
+  return{
+    level:startLevel,cfg,
+    ninja:{x:80,y:GROUND_Y-NINJA_H,vy:0,onGround:true,slashing:false,slashTimer:0},
+    blade:null,blocks:[],particles:[],
+    tokens:0,lives:3,combo:0,comboTimer:0,
+    powerMode:false,powerTimer:0,
+    speedMult:1,speedTimer:0,
+    frame:0,spawnCounter:0,
+    bgStars:Array.from({length:40},()=>({x:Math.random()*CANVAS_W,y:Math.random()*GROUND_Y,r:Math.random()*1.5+0.5,tw:Math.random()*60})),
+  };
+}
+
+function spawnParticles(x,y,color,count){
+  for(let i=0;i<count;i++){
+    const a=(Math.PI*2*i)/count+Math.random()*0.5,sp=2+Math.random()*3;
+    S.particles.push({x,y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp-2,life:30+Math.random()*20,color,size:3+Math.random()*3});
+  }
+}
+
+// ─── LOOP ────────────────────────────────────────────────────
+function loop(){
+  if(!S)return;
+  const canvas=document.getElementById('gameCanvas');
+  if(!canvas)return;
+  const ctx=canvas.getContext('2d');
+  S.frame++;
+  const cfg=S.cfg,n=S.ninja;
+
+  if(KEYS.ArrowLeft||KEYS.a) n.x=Math.max(0,n.x-4);
+  if(KEYS.ArrowRight||KEYS.d) n.x=Math.min(CANVAS_W-NINJA_W,n.x+4);
+
+  n.vy+=GRAVITY;n.y+=n.vy;
+  if(n.y>=GROUND_Y-NINJA_H){n.y=GROUND_Y-NINJA_H;n.vy=0;n.onGround=true;}
+  if(n.slashTimer>0){n.slashTimer--;if(n.slashTimer===0)n.slashing=false;}
+
+  if(S.blade){S.blade.x+=S.blade.vx*(S.powerMode?1.5:1);if(S.blade.x>CANVAS_W+20)S.blade=null;}
+  if(S.powerMode){S.powerTimer--;if(S.powerTimer<=0)S.powerMode=false;}
+  if(S.speedTimer>0){S.speedTimer--;if(S.speedTimer===0)S.speedMult=1;}
+  if(S.comboTimer>0){S.comboTimer--;if(S.comboTimer===0)S.combo=0;}
+
+  const effectiveRate=Math.max(18,cfg.spawnRate-Math.floor(S.tokens/3));
+  S.spawnCounter++;
+  if(S.spawnCounter>=effectiveRate){
+    S.spawnCounter=0;
+    const isBomb=Math.random()<(0.15+(cfg.level-1)*0.02);
+    const y=isBomb?GROUND_Y-NINJA_H-Math.random()*80:Math.random()<0.4?GROUND_Y-NINJA_H-100-Math.random()*120:GROUND_Y-NINJA_H-Math.random()*20;
+    S.blocks.push({x:CANVAS_W+10,y,emoji:isBomb?ri(BOMBS):(Math.random()<0.6?ri(FRUITS):ri(VEGS)),isBomb,vx:cfg.speed*S.speedMult*(0.9+Math.random()*0.2),collected:false,size:32});
+  }
+
+  for(let i=S.blocks.length-1;i>=0;i--){
+    const b=S.blocks[i];
+    b.x-=b.vx;
+    if(S.blade&&!b.collected){
+      const bx=S.blade.x,by=S.blade.y;
+      if(bx<b.x+b.size&&bx+BLADE_W>b.x&&by<b.y+b.size&&by+BLADE_H>b.y){
+        if(b.isBomb){S.lives--;spawnParticles(b.x+16,b.y+16,"#ff4444",12);S.blade=null;}
+        else{b.collected=true;S.tokens++;S.combo++;S.comboTimer=90;if(S.combo>=5){S.powerMode=true;S.powerTimer=180;}spawnParticles(b.x+16,b.y+16,cfg.accent,8);S.blade=null;}
+      }
+    }
+    if(!b.collected&&b.isBomb){
+      if(n.x<b.x+b.size&&n.x+NINJA_W>b.x&&n.y<b.y+b.size&&n.y+NINJA_H>b.y){
+        S.lives--;spawnParticles(b.x+16,b.y+16,"#ff4444",14);b.collected=true;
+      }
+    }
+    if(b.x<-b.size){
+      if(!b.collected&&!b.isBomb){if(Math.random()<0.3){S.speedMult=1.5;S.speedTimer=120;}S.combo=0;}
+      S.blocks.splice(i,1);
+    }
+  }
+
+  for(let i=S.particles.length-1;i>=0;i--){
+    const p=S.particles[i];
+    p.x+=p.vx;p.y+=p.vy;p.vy+=0.15;p.life--;
+    if(p.life<=0)S.particles.splice(i,1);
+  }
+
+  if(S.lives<=0){cancelAnimationFrame(RAF);SCREEN="dead";render();return;}
+
+  if(S.tokens>=cfg.tokensNeeded){
+    const nextLevel=cfg.level+1;
+    if(cfg.level>=10){cancelAnimationFrame(RAF);SCREEN="win";render();return;}
+    // ── PAYWALL CHECK ──
+    if(cfg.level>=FREE_LEVELS&&!isUnlocked()){
+      cancelAnimationFrame(RAF);
+      S.level=nextLevel;
+      SCREEN="paywall";
+      render();
+      return;
+    }
+    const nextCfg=LEVEL_CONFIG[cfg.level];
+    S.level=nextLevel;S.cfg=nextCfg;S.tokens=0;S.blocks=[];S.combo=0;S.powerMode=false;S.spawnCounter=0;
+    showLevelBanner(nextCfg);
+  }
+
+  draw(ctx);
+  updateHUD();
+  RAF=requestAnimationFrame(loop);
+}
+
+let bannerTimer=0,bannerText="",bannerColor="#fff";
+function showLevelBanner(cfg){bannerText=`LEVEL ${cfg.level} — ${cfg.name}`;bannerColor=cfg.accent;bannerTimer=120;}
+
+function draw(ctx){
+  const cfg=S.cfg,n=S.ninja;
+  ctx.fillStyle=cfg.bg;ctx.fillRect(0,0,CANVAS_W,CANVAS_H);
+  S.bgStars.forEach(st=>{
+    const tw=0.5+0.5*Math.sin((S.frame+st.tw)*0.05);
+    ctx.globalAlpha=tw*0.8;ctx.fillStyle="#fff";
+    ctx.beginPath();ctx.arc(st.x,st.y,st.r,0,Math.PI*2);ctx.fill();
+  });
+  ctx.globalAlpha=1;
+  const gr=ctx.createLinearGradient(0,GROUND_Y,0,CANVAS_H);
+  gr.addColorStop(0,cfg.accent+"44");gr.addColorStop(1,cfg.accent+"11");
+  ctx.fillStyle=gr;ctx.fillRect(0,GROUND_Y,CANVAS_W,CANVAS_H-GROUND_Y);
+  ctx.strokeStyle=cfg.accent;ctx.lineWidth=2;ctx.shadowColor=cfg.accent;ctx.shadowBlur=8;
+  ctx.beginPath();ctx.moveTo(0,GROUND_Y);ctx.lineTo(CANVAS_W,GROUND_Y);ctx.stroke();
+  ctx.shadowBlur=0;
+  ctx.textAlign="center";ctx.textBaseline="middle";
+  S.blocks.forEach(b=>{
+    if(b.collected)return;
+    ctx.font=`${b.size}px serif`;
+    if(b.isBomb){ctx.shadowColor="#ff4444";ctx.shadowBlur=12;}
+    ctx.fillText(b.emoji,b.x+b.size/2,b.y+b.size/2);ctx.shadowBlur=0;
+  });
+  if(S.blade){
+    ctx.save();ctx.translate(S.blade.x+BLADE_W/2,S.blade.y+BLADE_H/2);ctx.rotate(S.frame*0.4);
+    ctx.font="28px serif";ctx.textAlign="center";ctx.textBaseline="middle";
+    ctx.shadowColor=cfg.accent;ctx.shadowBlur=16;ctx.fillText("🌟",0,0);ctx.shadowBlur=0;ctx.restore();
+  }
+  ctx.save();ctx.translate(n.x+NINJA_W/2,n.y+NINJA_H/2);
+  if(n.slashing)ctx.rotate(-0.3);
+  ctx.font=`${NINJA_H}px serif`;ctx.textAlign="center";ctx.textBaseline="middle";
+  if(S.powerMode){ctx.shadowColor=cfg.accent;ctx.shadowBlur=20;}
+  ctx.fillText("🥷",0,0);ctx.shadowBlur=0;ctx.restore();
+  S.particles.forEach(p=>{
+    ctx.globalAlpha=p.life/50;ctx.fillStyle=p.color;ctx.shadowColor=p.color;ctx.shadowBlur=6;
+    ctx.beginPath();ctx.arc(p.x,p.y,p.size,0,Math.PI*2);ctx.fill();ctx.shadowBlur=0;
+  });
+  ctx.globalAlpha=1;
+  if(S.combo>=3){
+    ctx.font="bold 22px 'Courier New',monospace";ctx.textAlign="center";
+    ctx.fillStyle=cfg.accent;ctx.shadowColor=cfg.accent;ctx.shadowBlur=10;
+    ctx.fillText(`COMBO x${S.combo}!`,CANVAS_W/2,80);ctx.shadowBlur=0;
+  }
+  if(S.powerMode){
+    ctx.font="bold 16px 'Courier New',monospace";ctx.textAlign="center";
+    ctx.fillStyle=cfg.accent;ctx.shadowColor=cfg.accent;ctx.shadowBlur=14;
+    ctx.fillText("⚡ POWER MODE ⚡",CANVAS_W/2,110);ctx.shadowBlur=0;
+  }
+  if(bannerTimer>0){
+    bannerTimer--;
+    ctx.globalAlpha=Math.min(1,bannerTimer/20);
+    ctx.font="bold 28px 'Courier New',monospace";ctx.textAlign="center";
+    ctx.fillStyle=bannerColor;ctx.shadowColor=bannerColor;ctx.shadowBlur=20;
+    ctx.fillText(bannerText,CANVAS_W/2,CANVAS_H/2);ctx.shadowBlur=0;ctx.globalAlpha=1;
+  }
+}
+
+// ─── HUD ─────────────────────────────────────────────────────
+function updateHUD(){
+  if(!S)return;
+  const el=id=>document.getElementById(id);
+  if(el('hud-level')) el('hud-level').textContent=`LV ${S.level} · ${S.cfg.name}`;
+  if(el('hud-lives')) el('hud-lives').textContent="❤️".repeat(S.lives)+"🖤".repeat(Math.max(0,3-S.lives));
+  if(el('hud-tokens')) el('hud-tokens').textContent=`🍎 ${S.tokens}/${S.cfg.tokensNeeded}`;
+  const pct=(S.tokens/S.cfg.tokensNeeded)*100;
+  if(el('progress-bar')){
+    el('progress-bar').style.width=pct+'%';
+    el('progress-bar').style.boxShadow=`0 0 8px ${S.cfg.accent}`;
+    el('progress-bar').style.background=S.cfg.accent;
+  }
+  const ac=S.cfg.accent;
+  ['hud-level','hud-tokens'].forEach(id=>{if(el(id))el(id).style.color=ac;});
+}
+
+// ─── SCREENS ─────────────────────────────────────────────────
+function render(){
+  const root=document.getElementById('root');
+  if(SCREEN==="menu")    root.innerHTML=menuHTML();
+  else if(SCREEN==="playing")  root.innerHTML=gameHTML();
+  else if(SCREEN==="paywall")  root.innerHTML=paywallHTML();
+  else if(SCREEN==="dead")     root.innerHTML=deadHTML();
+  else if(SCREEN==="win")      root.innerHTML=winHTML();
+  bindEvents();
+}
+
+function menuHTML(){
+  const unlocked=isUnlocked();
+  const rows=LEVEL_CONFIG.map(l=>{
+    const locked=l.level>FREE_LEVELS&&!unlocked;
+    return`<div onclick="${locked?'':'startGame('+l.level+')'}" style="background:#111;border:1px solid ${locked?'#333':l.accent+'33'};border-radius:8px;padding:8px 12px;cursor:${locked?'not-allowed':'pointer'};opacity:${locked?0.45:1};transition:border-color 0.2s;position:relative"
+      ${locked?'':`onmouseover="this.style.borderColor='${l.accent}'" onmouseout="this.style.borderColor='${l.accent}33'"`}>
+      <span style="color:${locked?'#555':l.accent};font-weight:700">Lv ${l.level}</span>
+      <span style="color:#666;font-size:11px;margin-left:8px">${l.name}</span>
+      ${locked?'<span style="position:absolute;right:8px;top:50%;transform:translateY(-50%);font-size:12px">🔒</span>':''}
+    </div>`;
+  }).join('');
+  return`<div style="text-align:center;color:#fff;max-width:460px;padding:20px;overflow-y:auto;max-height:100vh">
+    <div style="font-size:64px;margin-bottom:8px">🥷</div>
+    <h1 style="font-size:28px;font-weight:900;letter-spacing:3px;margin-bottom:4px;background:linear-gradient(90deg,#4ade80,#818cf8,#fb923c);-webkit-background-clip:text;-webkit-text-fill-color:transparent">NINJA LOOT CHOPPER</h1>
+    <p style="color:#888;font-size:13px;margin-bottom:6px">Slice fruits. Dodge bombs. Survive 10 levels.</p>
+    ${!unlocked?`<div class="pulse" style="display:inline-block;background:#ffd70022;border:1px solid #ffd70066;border-radius:20px;padding:4px 14px;font-size:12px;color:#ffd700;margin-bottom:16px">🆓 Levels 1–3 FREE · Levels 4–10 require unlock</div>`
+    :`<div style="display:inline-block;background:#4ade8022;border:1px solid #4ade8066;border-radius:20px;padding:4px 14px;font-size:12px;color:#4ade80;margin-bottom:16px">✅ Full Access Unlocked</div>`}
+    <div style="background:#111;border:1px solid #333;border-radius:12px;padding:14px 18px;margin-bottom:16px;text-align:left;font-size:12px;color:#aaa;line-height:1.9">
+      <b style="color:#fff">CONTROLS</b><br>
+      ⬅ ➡ / A D — Move &nbsp;|&nbsp; ↑ / W / Space — Jump<br>
+      Z / X / Enter — Throw Shuriken<br>
+      <span style="color:#4ade80">5 combo streak → ⚡ Power Mode</span>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:20px">${rows}</div>
+    <button onclick="startGame(1)" style="background:linear-gradient(135deg,#4ade80,#22c55e);color:#000;border:none;padding:14px 48px;border-radius:8px;font-size:16px;font-weight:900;cursor:pointer;letter-spacing:2px;box-shadow:0 0 20px #4ade8066">START — LEVEL 1</button>
+  </div>`;
+}
+
+function gameHTML(){
+  const ac=S?S.cfg.accent:"#4ade80";
+  return`<div style="display:flex;flex-direction:column;align-items:center">
+    <div style="width:${CANVAS_W}px;background:#050510;padding:10px 16px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid ${ac}33">
+      <div id="hud-level" style="color:${ac};font-weight:700;font-size:13px">LV 1</div>
+      <div id="hud-lives" style="font-size:13px">❤️❤️❤️</div>
+      <div id="hud-tokens" style="color:${ac};font-weight:700;font-size:13px">🍎 0/8</div>
+    </div>
+    <div style="width:${CANVAS_W}px;height:4px;background:#1a1a2e">
+      <div id="progress-bar" style="height:4px;background:${ac};width:0%;transition:width 0.2s"></div>
+    </div>
+    <canvas id="gameCanvas" width="${CANVAS_W}" height="${CANVAS_H}"></canvas>
+    <div style="width:${CANVAS_W}px;background:#050510;padding:10px 12px;display:flex;gap:8px;border-top:1px solid ${ac}22">
+      <button id="btn-left"  style="flex:1;padding:14px 0;background:#1a1a2e;border:1px solid ${ac}44;border-radius:8px;color:${ac};font-size:22px;cursor:pointer">◀</button>
+      <button id="btn-jump"  style="flex:1;padding:14px 0;background:#1a1a2e;border:1px solid ${ac}44;border-radius:8px;color:${ac};font-size:22px;cursor:pointer">▲</button>
+      <button id="btn-slash" style="flex:1.5;padding:14px 0;background:${ac}22;border:1px solid ${ac};border-radius:8px;color:${ac};font-size:15px;font-weight:700;cursor:pointer">⭐ SLASH</button>
+      <button id="btn-right" style="flex:1;padding:14px 0;background:#1a1a2e;border:1px solid ${ac}44;border-radius:8px;color:${ac};font-size:22px;cursor:pointer">▶</button>
+    </div>
+  </div>`;
+}
+
+function paywallHTML(){
+  const nextLevel=S?S.level:4;
+  return`<div style="text-align:center;color:#fff;max-width:420px;padding:24px 20px">
+    <!-- Trophy + lock -->
+    <div style="font-size:56px;margin-bottom:6px">🔒</div>
+    <h2 style="font-size:24px;font-weight:900;letter-spacing:2px;margin-bottom:6px;background:linear-gradient(90deg,#ffd700,#fb923c);-webkit-background-clip:text;-webkit-text-fill-color:transparent">LEVEL ${nextLevel} LOCKED</h2>
+    <p style="color:#888;font-size:13px;margin-bottom:20px">You've completed the free preview (Levels 1–${FREE_LEVELS}).<br>Unlock all 10 levels to continue.</p>
+
+    <!-- What you get -->
+    <div style="background:#0f0f1a;border:1px solid #ffd70033;border-radius:12px;padding:16px;margin-bottom:20px;text-align:left">
+      <div style="color:#ffd700;font-weight:700;font-size:13px;margin-bottom:10px">🏆 FULL ACCESS INCLUDES</div>
+      ${[4,5,6,7,8,9,10].map(l=>`
+        <div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid #ffffff0a;font-size:13px;color:#ccc">
+          <span style="color:${LEVEL_CONFIG[l-1].accent}">●</span>
+          <span>Level ${l} — ${LEVEL_CONFIG[l-1].name}</span>
+        </div>`).join('')}
+      <div style="margin-top:10px;font-size:12px;color:#666">+ Power Mode · Metal Climax combos · Full leaderboard</div>
+    </div>
+
+    <!-- Pay button -->
+    <a href="${PAYMENT_URL}" target="_blank" style="text-decoration:none">
+      <button class="glow-btn" style="width:100%;padding:16px;background:linear-gradient(135deg,#ffd700,#fb923c);color:#000;border:none;border-radius:10px;font-size:18px;font-weight:900;cursor:pointer;letter-spacing:1px;margin-bottom:16px">
+        💳 UNLOCK FULL GAME
+      </button>
+    </a>
+
+    <!-- Divider -->
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+      <div style="flex:1;height:1px;background:#333"></div>
+      <span style="color:#555;font-size:12px">or have a code?</span>
+      <div style="flex:1;height:1px;background:#333"></div>
+    </div>
+
+    <!-- Access code entry -->
+    <div style="background:#0f0f1a;border:1px solid #333;border-radius:10px;padding:16px;margin-bottom:16px">
+      <div style="color:#aaa;font-size:12px;margin-bottom:8px">Enter your access code</div>
+      <div style="display:flex;gap:8px">
+        <input id="code-input" type="text" placeholder="e.g. NINJA2024" maxlength="20"
+          style="flex:1;padding:10px 12px;background:#1a1a2e;border:1px solid #444;border-radius:6px;color:#fff;font-size:14px;letter-spacing:1px;outline:none"
+          oninput="this.value=this.value.toUpperCase()"
+          onkeydown="if(event.key==='Enter')submitCode()"/>
+        <button onclick="submitCode()" style="padding:10px 16px;background:#7c3aed;border:none;border-radius:6px;color:#fff;font-weight:700;cursor:pointer;font-size:13px">APPLY</button>
+      </div>
+      <div id="code-msg" style="height:18px;margin-top:8px;font-size:12px;text-align:left"></div>
+    </div>
+
+    <!-- Back -->
+    <button onclick="goMenu()" style="background:transparent;color:#555;border:1px solid #333;padding:10px 24px;border-radius:8px;cursor:pointer;font-size:13px">← Back to Menu</button>
+  </div>`;
+}
+
+function deadHTML(){
+  const atPaywall=S&&S.level>FREE_LEVELS&&!isUnlocked();
+  return`<div style="text-align:center;color:#fff;padding:20px">
+    <div style="font-size:64px;margin-bottom:8px">💀</div>
+    <h2 style="font-size:28px;font-weight:900;color:#ff4444;letter-spacing:2px">MISSION FAILED</h2>
+    <p style="color:#666;margin-bottom:6px">Reached Level ${S?S.level:1} · ${S?S.cfg.name:""}</p>
+    <p style="color:#aaa;font-size:12px;margin-bottom:28px">Start this level again — not from the beginning.</p>
+    <div style="display:flex;gap:12px;justify-content:center">
+      <button onclick="startGame(${S?S.level:1})" style="background:#ff4444;color:#fff;border:none;padding:12px 28px;border-radius:8px;font-size:15px;font-weight:700;cursor:pointer">RETRY LV ${S?S.level:1}</button>
+      <button onclick="goMenu()" style="background:#222;color:#aaa;border:1px solid #444;padding:12px 28px;border-radius:8px;font-size:15px;cursor:pointer">MENU</button>
+    </div>
+  </div>`;
+}
+
+function winHTML(){
+  return`<div style="text-align:center;color:#fff;padding:20px">
+    <div style="font-size:64px;margin-bottom:8px">🏆</div>
+    <h2 style="font-size:28px;font-weight:900;letter-spacing:2px;background:linear-gradient(90deg,#ffd700,#fb923c);-webkit-background-clip:text;-webkit-text-fill-color:transparent">NINJA MASTER!</h2>
+    <p style="color:#ffd700;margin-bottom:24px">All 10 levels conquered. The legend is complete.</p>
+    <button onclick="startGame(1)" style="background:linear-gradient(135deg,#ffd700,#fb923c);color:#000;border:none;padding:14px 40px;border-radius:8px;font-size:16px;font-weight:900;cursor:pointer;letter-spacing:2px">PLAY AGAIN</button>
+  </div>`;
+}
+
+// ─── CODE SUBMISSION ─────────────────────────────────────────
+function submitCode(){
+  const input=document.getElementById('code-input');
+  const msg=document.getElementById('code-msg');
+  if(!input||!msg)return;
+  const code=input.value.trim();
+  if(!code){msg.style.color="#ff4444";msg.textContent="Please enter a code.";return;}
+  if(validateCode(code)){
+    unlockGame();
+    msg.style.color="#4ade80";
+    msg.textContent="✅ Code accepted! Unlocking full game…";
+    setTimeout(()=>{
+      const nextLevel=S?S.level:4;
+      startGame(nextLevel);
+    },1200);
+  } else {
+    msg.style.color="#ff4444";
+    msg.textContent="❌ Invalid code. Check and try again.";
+    input.classList.add('shake');
+    setTimeout(()=>input.classList.remove('shake'),500);
+    input.value="";
+    input.focus();
+  }
+}
+
+// ─── BIND CONTROLS ───────────────────────────────────────────
+function bindEvents(){
+  if(SCREEN!=="playing")return;
+  const el=id=>document.getElementById(id);
+  const L=el('btn-left'),R=el('btn-right'),J=el('btn-jump'),SL=el('btn-slash');
+  if(L){L.addEventListener('pointerdown',()=>KEYS.ArrowLeft=true);L.addEventListener('pointerup',()=>KEYS.ArrowLeft=false);L.addEventListener('pointerleave',()=>KEYS.ArrowLeft=false);}
+  if(R){R.addEventListener('pointerdown',()=>KEYS.ArrowRight=true);R.addEventListener('pointerup',()=>KEYS.ArrowRight=false);R.addEventListener('pointerleave',()=>KEYS.ArrowRight=false);}
+  if(J) J.addEventListener('pointerdown',doJump);
+  if(SL) SL.addEventListener('pointerdown',doSlash);
+}
+
+function doJump(){if(S&&S.ninja.onGround){S.ninja.vy=JUMP_V;S.ninja.onGround=false;}}
+function doSlash(){if(S&&!S.blade){S.blade={x:S.ninja.x+NINJA_W,y:S.ninja.y+NINJA_H/2-BLADE_H/2,vx:9};S.ninja.slashing=true;S.ninja.slashTimer=12;}}
+
+window.addEventListener('keydown',e=>{
+  KEYS[e.key]=true;
+  if(!S)return;
+  if((e.key===" "||e.key==="ArrowUp"||e.key==="w")&&S.ninja.onGround)doJump();
+  if(e.key==="z"||e.key==="x"||e.key==="Enter")doSlash();
+  if(e.key===" ")e.preventDefault();
+});
+window.addEventListener('keyup',e=>{KEYS[e.key]=false;});
+
+// ─── ACTIONS ─────────────────────────────────────────────────
+function startGame(fromLevel){
+  fromLevel=parseInt(fromLevel)||1;
+  // guard: non-unlocked user trying to skip to locked level via menu click (locked buttons are disabled anyway)
+  if(fromLevel>FREE_LEVELS&&!isUnlocked()){SCREEN="paywall";S={level:fromLevel,cfg:LEVEL_CONFIG[fromLevel-1]};render();return;}
+  S=initState(fromLevel);SCREEN="playing";
+  cancelAnimationFrame(RAF);render();
+  RAF=requestAnimationFrame(loop);
+}
+function goMenu(){cancelAnimationFrame(RAF);SCREEN="menu";render();}
+
+// ─── BOOT ────────────────────────────────────────────────────
+render();
+</script>
+</body>
+</html>
